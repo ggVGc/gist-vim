@@ -68,6 +68,10 @@ if !exists('g:gist_update_on_write')
   let g:gist_update_on_write = 1
 endif
 
+if !exists('g:gist_use_filename')
+  let g:gist_use_filename = 1
+endif
+
 function! s:get_browser_command() abort
   let gist_browser_command = get(g:, 'gist_browser_command', '')
   if gist_browser_command ==# ''
@@ -554,7 +558,10 @@ function! s:GistDelete(gistid) abort
 endfunction
 
 function! s:get_current_filename(no) abort
-  let filename = expand('%:t')
+  let filename = ''
+  if g:gist_use_filename == 1
+    let filename = expand('%:t')
+  endif
   if len(filename) == 0 && &ft !=# ''
     let pair = filter(items(s:extmap), 'v:val[1] == &ft')
     if len(pair) > 0
