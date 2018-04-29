@@ -1,8 +1,8 @@
 "=============================================================================
 " File: gist.vim
 " Author: Yasuhiro Matsumoto <mattn.jp@gmail.com>
-" Last Change: 04-Mar-2015.
-" Version: 7.2
+" Last Change: 10-Oct-2016.
+" Version: 7.3
 " WebPage: http://github.com/mattn/gist-vim
 " License: BSD
 
@@ -28,6 +28,8 @@ endif
 if globpath(&rtp, 'autoload/webapi/http.vim') ==# ''
   echohl ErrorMsg | echomsg 'Gist: require ''webapi'', install https://github.com/mattn/webapi-vim' | echohl None
   finish
+else
+  call webapi#json#true()
 endif
 
 let s:gist_token_file = expand(get(g:, 'gist_token_file', '~/.gist-vim'))
@@ -100,14 +102,16 @@ function! s:open_browser(url) abort
     echo a:url
     return
   endif
+  let quote = &shellxquote == '"' ?  "'" : '"'
   if cmd =~# '^!'
-    let cmd = substitute(cmd, '%URL%', '\=shellescape(a:url)', 'g')
+    let cmd = substitute(cmd, '%URL%', '\=quote.a:url.quote', 'g')
+    let g:hoge = cmd
     silent! exec cmd
   elseif cmd =~# '^:[A-Z]'
     let cmd = substitute(cmd, '%URL%', '\=a:url', 'g')
     exec cmd
   else
-    let cmd = substitute(cmd, '%URL%', '\=shellescape(a:url)', 'g')
+    let cmd = substitute(cmd, '%URL%', '\=quote.a:url.quote', 'g')
     call system(cmd)
   endif
 endfunction
@@ -117,6 +121,28 @@ function! s:shellwords(str) abort
   let words = map(words, 'substitute(v:val, ''\\\([\\ ]\)'', ''\1'', "g")')
   let words = map(words, 'matchstr(v:val, ''^\%\("\zs\(.*\)\ze"\|''''\zs\(.*\)\ze''''\|.*\)$'')')
   return words
+endfunction
+
+function! s:truncate(str, num)
+  let mx_first = '^\(.\)\(.*\)$'
+  let str = a:str
+  let ret = ''
+  let width = 0
+  while 1
+    let char = substitute(str, mx_first, '\1', '')
+    let cells = strdisplaywidth(char)
+    if cells == 0 || width + cells > a:num
+      break
+    endif
+    let width = width + cells
+    let ret .= char
+    let str = substitute(str, mx_first, '\2', '')
+  endwhile
+  while width + 1 <= a:num
+    let ret .= " "
+    let width = width + 1
+  endwhile
+  return ret
 endfunction
 
 function! s:format_gist(gist) abort
@@ -132,12 +158,20 @@ function! s:format_gist(gist) abort
   else
     let code = ''
   endif
-  let desc = type(a:gist.description)==0 || a:gist.description ==# '' ? '' : '('.a:gist.description.')'
+  let desc = type(a:gist.description)==0 || a:gist.description ==# '' ? '' : a:gist.description
   let name = substitute(name, '[\r\n\t]', ' ', 'g')
   let name = substitute(name, '  ', ' ', 'g')
   let desc = substitute(desc, '[\r\n\t]', ' ', 'g')
   let desc = substitute(desc, '  ', ' ', 'g')
-  return printf('gist: %s %s %s%s', a:gist.id, name, desc, code)
+  " Display a nice formatted (and truncated if needed) table of gists on screen
+  " Calculate field lengths for gist-listing formatting on screen
+  redir =>a |exe "sil sign place buffer=".bufnr('')|redir end
+  let signlist = split(a, '\n')
+  let width = winwidth(0) - ((&number||&relativenumber) ? &numberwidth : 0) - &foldcolumn - (len(signlist) > 2 ? 2 : 0)
+  let idlen = 33
+  let namelen = get(g:, 'gist_namelength', 30)
+  let desclen = width - (idlen + namelen + 10)
+  return printf('gist: %s %s %s', s:truncate(a:gist.id, idlen), s:truncate(name, namelen), s:truncate(desc, desclen))
 endfunction
 
 " Note: A colon in the file name has side effects on Windows due to NTFS Alternate Data Streams; avoid it.
@@ -211,11 +245,17 @@ function! s:GistList(gistls, page) abort
   let b:gistls = a:gistls
   let b:page = a:page
   setlocal buftype=nofile bufhidden=hide noswapfile
+  setlocal cursorline
   setlocal nomodified
   setlocal nomodifiable
   syntax match SpecialKey /^gist:/he=e-1
   syntax match Title /^gist: \S\+/hs=s+5 contains=ALL
   nnoremap <silent> <buffer> <cr> :call <SID>GistListAction(0)<cr>
+  nnoremap <silent> <buffer> o :call <SID>GistListAction(0)<cr>
+  nnoremap <silent> <buffer> b :call <SID>GistListAction(1)<cr>
+  nnoremap <silent> <buffer> y :call <SID>GistListAction(2)<cr>
+  nnoremap <silent> <buffer> p :call <SID>GistListAction(3)<cr>
+  nnoremap <silent> <buffer> <esc> :bw<cr>
   nnoremap <silent> <buffer> <s-cr> :call <SID>GistListAction(1)<cr>
 
   cal cursor(1+len(oldlines),1)
@@ -364,6 +404,9 @@ function! s:GistGet(gistid, clipboard) abort
       echohl ErrorMsg | echomsg 'Gist not found' | echohl None
       return
     endif
+    augroup GistWrite
+      au!
+    augroup END
     for n in range(num_file)
       try
         let old_undolevels = &undolevels
@@ -434,7 +477,7 @@ function! s:GistGet(gistid, clipboard) abort
         return
       endtry
       let &undolevels = old_undolevels
-      setlocal buftype=acwrite bufhidden=delete noswapfile
+      setlocal buftype=acwrite bufhidden=hide noswapfile
       setlocal nomodified
       doau StdinReadPost,BufRead,BufReadPost
       let gist_detect_filetype = get(g:, 'gist_detect_filetype', 0)
@@ -452,7 +495,6 @@ function! s:GistGet(gistid, clipboard) abort
       endif
       1
       augroup GistWrite
-        au!
         au! BufWriteCmd <buffer> call s:GistWrite(expand("<amatch>"))
       augroup END
     endfor
@@ -464,15 +506,28 @@ function! s:GistGet(gistid, clipboard) abort
   endif
 endfunction
 
-function! s:GistListAction(shift) abort
+function! s:GistListAction(mode) abort
   let line = getline('.')
   let mx = '^gist:\s*\zs\(\w\+\)\ze.*'
   if line =~# mx
     let gistid = matchstr(line, mx)
-    if a:shift
+    if a:mode == 1
       call s:open_browser('https://gist.github.com/' . gistid)
-    else
+    elseif a:mode == 0
       call s:GistGet(gistid, 0)
+      wincmd w
+      bw
+    elseif a:mode == 2
+      call s:GistGet(gistid, 1)
+      " TODO close with buffe rname
+      bdelete
+      bdelete
+    elseif a:mode == 3
+      call s:GistGet(gistid, 1)
+      " TODO close with buffe rname
+      bdelete
+      bdelete
+      normal! "+p
     endif
     return
   endif
@@ -485,6 +540,10 @@ endfunction
 function! s:GistUpdate(content, gistid, gistnm, desc) abort
   let gist = { "id": a:gistid, "files" : {}, "description": "","public": function('webapi#json#true') }
   if exists('b:gist')
+    if has_key(b:gist, 'filename') && len(a:gistnm) > 0
+      let gist.files[b:gist.filename] = { "content": '', "filename": b:gist.filename }
+      let b:gist.filename = a:gistnm
+    endif
     if has_key(b:gist, 'private') && b:gist.private | let gist['public'] = function('webapi#json#false') | endif
     if has_key(b:gist, 'description') | let gist['description'] = b:gist.description | endif
     if has_key(b:gist, 'filename') | let filename = b:gist.filename | endif
@@ -524,9 +583,9 @@ function! s:GistUpdate(content, gistid, gistnm, desc) abort
   if res.status =~# '^2'
     let obj = webapi#json#decode(res.content)
     let loc = obj['html_url']
-    redraw | echomsg 'Done: '.loc
     let b:gist = {"id": a:gistid, "filename": filename}
     setlocal nomodified
+    redraw | echomsg 'Done: '.loc
   else
     let loc = ''
     echohl ErrorMsg | echomsg 'Post failed: ' . res.message | echohl None
@@ -548,10 +607,10 @@ function! s:GistDelete(gistid) abort
   \   "Content-Type": "application/json",
   \}, 'DELETE')
   if res.status =~# '^2'
-    redraw | echomsg 'Done: '
     if exists('b:gist')
       unlet b:gist
     endif
+    redraw | echomsg 'Done: '
   else
     echohl ErrorMsg | echomsg 'Delete failed: ' . res.message | echohl None
   endif
@@ -622,7 +681,6 @@ function! s:GistPost(content, private, desc, anonymous) abort
   if res.status =~# '^2'
     let obj = webapi#json#decode(res.content)
     let loc = obj['html_url']
-    redraw | echomsg 'Done: '.loc
     let b:gist = {
     \ "filename": filename,
     \ "id": matchstr(loc, '[^/]\+$'),
@@ -632,6 +690,7 @@ function! s:GistPost(content, private, desc, anonymous) abort
     if s:update_GistID(b:gist['id'])
       Gist -e
     endif
+    redraw | echomsg 'Done: '.loc
   else
     let loc = ''
     echohl ErrorMsg | echomsg 'Post failed: '. res.message | echohl None
@@ -678,7 +737,6 @@ function! s:GistPostBuffers(private, desc, anonymous) abort
   if res.status =~# '^2'
     let obj = webapi#json#decode(res.content)
     let loc = obj['html_url']
-    redraw | echomsg 'Done: '.loc
     let b:gist = {
     \ "filename": filename,
     \ "id": matchstr(loc, '[^/]\+$'),
@@ -688,6 +746,7 @@ function! s:GistPostBuffers(private, desc, anonymous) abort
     if s:update_GistID(b:gist['id'])
       Gist -e
     endif
+    redraw | echomsg 'Done: '.loc
   else
     let loc = ''
     echohl ErrorMsg | echomsg 'Post failed: ' . res.message | echohl None
@@ -695,7 +754,7 @@ function! s:GistPostBuffers(private, desc, anonymous) abort
   return loc
 endfunction
 
-function! gist#Gist(count, line1, line2, ...) abort
+function! gist#Gist(count, bang, line1, line2, ...) abort
   redraw
   let bufname = bufname('%')
   " find GistID: in content , then we should just update
@@ -713,10 +772,12 @@ function! gist#Gist(count, line1, line2, ...) abort
   let listmx = '^\%(-l\|--list\)\s*\([^\s]\+\)\?$'
   let bufnamemx = '^' . s:bufprefix .'\(\zs[0-9a-f]\+\ze\|\zs[0-9a-f]\+\ze[/\\].*\)$'
   if strlen(g:github_user) == 0 && anonymous == 0
-    echohl ErrorMsg | echomsg 'You don''t have github account. read '':help gist-vim-setup''.' | echohl None
+    echohl ErrorMsg | echomsg 'You have not configured a Github account. Read '':help gist-vim-setup''.' | echohl None
     return
   endif
-  if bufname =~# bufnamemx
+  if a:bang == '!'
+    let gistidbuf = ''
+  elseif bufname =~# bufnamemx
     let gistidbuf = matchstr(bufname, bufnamemx)
   elseif exists('b:gist') && has_key(b:gist, 'id')
     let gistidbuf = b:gist['id']
@@ -764,8 +825,10 @@ function! gist#Gist(count, line1, line2, ...) abort
     elseif arg =~# '^\(-d\|--delete\)$\C' && gistidbuf !=# ''
       let gistid = gistidbuf
       let deletepost = 1
-    elseif arg =~# '^\(-e\|--edit\)$\C' && gistidbuf !=# ''
-      let gistid = gistidbuf
+    elseif arg =~# '^\(-e\|--edit\)$\C'
+      if gistidbuf !=# ''
+        let gistid = gistidbuf
+      endif
       let editpost = 1
     elseif arg =~# '^\(+1\|--star\)$\C' && gistidbuf !=# ''
       let auth = s:GistGetAuthHeader()
@@ -877,7 +940,7 @@ function! gist#Gist(count, line1, line2, ...) abort
         silent! normal! gv
       endif
     endif
-    if len(url) > 0
+    if type(url) == 1 && len(url) > 0
       if get(g:, 'gist_open_browser_after_post', 0) == 1 || openbrowser
         call s:open_browser(url)
       endif
@@ -888,10 +951,10 @@ function! gist#Gist(count, line1, line2, ...) abort
         endif
         if exists('g:gist_clip_command')
           call system(g:gist_clip_command, url)
-        elseif has('unix') && !has('xterm_clipboard')
-          let @" = url
-        else
+        elseif has('clipboard')
           let @+ = url
+        else
+          let @" = url
         endif
       endif
     endif
@@ -967,7 +1030,7 @@ function! s:GistGetAuthHeader() abort
   return secret
 endfunction
 
-let s:extmap = {
+let s:extmap = extend({
 \".adb": "ada",
 \".ahk": "ahk",
 \".arc": "arc",
@@ -1082,6 +1145,7 @@ let s:extmap = {
 \".sml": "sml",
 \".sql": "sql",
 \".st": "smalltalk",
+\".swift": "swift",
 \".tcl": "tcl",
 \".tcsh": "tcsh",
 \".tex": "tex",
@@ -1099,7 +1163,7 @@ let s:extmap = {
 \".xq": "xquery",
 \".xs": "xs",
 \".yml": "yaml",
-\}
+\}, get(g:, 'gist_extmap', {}))
 
 let &cpo = s:save_cpo
 unlet s:save_cpo
